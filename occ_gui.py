@@ -18,6 +18,7 @@ from PIL import ImageTk
 from matplotlib.figure import Figure
 #tell matlab to use tkinter backend:
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import multiprocessing as mp
 
 
 input_path='/home/pi/Desktop/occ_gui/app/'
@@ -58,6 +59,14 @@ logs_frame.pack(side=tkinter.LEFT)
 #### capture image ####
 #######################
 
+global stream
+global canvas_capture
+global input_image
+global cam_cap
+global image_on_canvas
+global fig
+global canvas_plot
+
 #exposure time (microseconds)
 #analog gain (factor)
 #digital gain (factor)
@@ -67,81 +76,62 @@ logs_frame.pack(side=tkinter.LEFT)
 #frame rate (fps)
 
 camera = picamera.PiCamera() #start the camera as a PiCamera object
-#stream = BytesIO()
-global stream
 stream = picamera.array.PiRGBArray(camera) #create a PiRGBArray stream object
 camera.resolution = (2592,1952) #set resolution (width,height) in pixels
 camera.framerate = 30 #set framerate in fps
 camera.shutter_speed = 333 #set exposure time in microseconds
 scaling_factor = 4
-global canvas_capture
-global input_image
-global cam_cap
-global image_on_canvas
+roi = int(camera.resolution[0]/2)#column of interest TODO: expand ROI to [x,y,w,h]
 canvas_capture = tkinter.Canvas(center_frame,width=camera.resolution[0]/scaling_factor,height=camera.resolution[1]/scaling_factor)
 canvas_capture.pack(side=tkinter.LEFT)
-
+camera.capture(stream, 'rgb')
+print("give me 5 seconds to warm up the camera pls :-)")
+time.sleep(5) #warm up time of the camera
+stream.truncate(0)
 camera.capture(stream, 'rgb')
 input_image = PIL.Image.fromarray(stream.array)
 cam_cap = ImageTk.PhotoImage(input_image.resize((int(camera.resolution[0]/scaling_factor),int(camera.resolution[1]/scaling_factor)),PIL.Image.ANTIALIAS))
 image_on_canvas = canvas_capture.create_image(0, 0, anchor=tkinter.NW, image=cam_cap)
+mysuperwellidentifiedline = canvas_capture.create_line(0,0,1,1)
+print("ok let's gooooooooooooooo")
 
 def take_photo():
     stream.truncate(0)
-
-    #canvas_capture.delete('all')
     #camera.start_preview() #overlay the camera input ***warning***: must use stop_preview() afterwards
-    #time.sleep(2) #warm up time of the camera
     camera.capture(stream, 'rgb') #save a photograph as raw RGB format matrix
-    #print(stream.array)
-    #stram.array is the matrix of the photograph in numpy format
     #camera.stop_preview() #must do if you did start_preview()
-
-    #input_image = PIL.Image.open(input_path+'test_hq_cam.jpeg')
     input_image = PIL.Image.fromarray(stream.array)
-    #print(input_image)
     input_image_resized = input_image.resize((int(camera.resolution[0]/scaling_factor),
                                               int(camera.resolution[1]/scaling_factor)),
                                              PIL.Image.ANTIALIAS)
-    
     cam_cap = ImageTk.PhotoImage(input_image_resized)
-    #print(cam_cap)
-    #canvas_capture = tkinter.Canvas(center_frame,width=camera.resolution[0]/scaling_factor,height=camera.resolution[1]/scaling_factor)
-    #image_on_canvas = canvas_capture.create_image(0, 0, anchor=tkinter.NW, image=cam_cap)
-    #print(image_on_canvas)
     canvas_capture.itemconfig(image_on_canvas,image=cam_cap)
     canvas_capture.image = cam_cap
     canvas_capture.update_idletasks()
-    print(canvas_capture)
+    refresh_plots(roi)
+    #end of take_photo function
     
-    #tkinter.Label(center_frame, image=cam_cap).pack(side=tkinter.RIGHT, expand='yes')
-
-#take_photo()
-
-#def take_photo():
-    #stream.truncate(0)
-    #camera.capture(stream, 'rgb')
-    #print("I just took a new photo!")
-    #new_input_image = PIL.Image.fromarray(stream.array)
-    #global cam_cap
-    #new_cap = ImageTk.PhotoImage(new_input_image.resize((int(camera.resolution[0]/scaling_factor),int(camera.resolution[1]/scaling_factor)),PIL.Image.ANTIALIAS))
-    #cam_cap.configure(image=new_cap)
-    #global image_on_canvas
-    #canvas_capture.itemconfigure(image_on_canvas, image=new_cap)
-    #canvas_capture.delete(image_on_canvas)
-    #image_on_canvas = canvas_capture.create_image(0, 0, anchor=tkinter.NW, image=new_cap)
-
-
 shutter_button = tkinter.Button(master=params_frame, text="take new photo", command=take_photo, anchor='w')
 shutter_button.pack(side=tkinter.LEFT)
 
 def callback(event):
     print("clicked at: ", event.x*scaling_factor, event.y*scaling_factor)
-    global mysuperwellidentifiedline
-    canvas_capture.delete(mysuperwellidentifiedline)
-    mysuperwellidentifiedline = canvas_capture.create_line(event.x, 0, event.x, int(camera.resolution[1]/scaling_factor), dash=(4, 2), fill='yellow')
-    rx_signal = stream.array[:,event.x*scaling_factor,:]
-    fig.clf()
+    global roi
+    roi=event.x*scaling_factor
+    refresh_plots(event.x*scaling_factor)
+    #end of callback function
+    
+canvas_capture.bind("<Button-1>", callback)
+
+#######################
+#### signals plots ####
+#######################
+
+def refresh_plots(roi): #for now roi is a column, which is in [0 to max horizontal resolution]
+    column = roi
+    rx_signal = stream.array[:,column,:] #pixel values at column x
+    fig.clf() #clear figure
+    #plot R,G,B:
     fig.add_subplot(311).plot(t,rx_signal[:,0],'r')
     ax = fig.gca()
     ax.set_ylim((0,255))
@@ -151,35 +141,23 @@ def callback(event):
     fig.add_subplot(313).plot(t,rx_signal[:,2],'b')
     ax = fig.gca()
     ax.set_ylim((0,255))
-    canvas_plot.draw()
-canvas_capture.bind("<Button-1>", callback)
-mysuperwellidentifiedline = canvas_capture.create_line(0,0,1,1)
+    canvas_plot.draw() #refresh the canvas
+    #and create the new line (at x-coordinate where the user clicked)
+    global mysuperwellidentifiedline #vertical dashed line to be analized
+    canvas_capture.delete(mysuperwellidentifiedline)
+    mysuperwellidentifiedline = canvas_capture.create_line(column/scaling_factor, 0, column/scaling_factor,
+                                                           int(camera.resolution[1]/scaling_factor),
+                                                           dash=(4, 2),
+                                                           fill='yellow')
 
-
-#######################
-#### signals plots ####
-#######################
-
-fig = Figure()
-
-delta_t = 18.904 #microseconds
-t = np.arange(0,camera.resolution[1]*delta_t,delta_t)
-rx_signal = stream.array[:,2028,:]
-fig.add_subplot(311).plot(t,rx_signal[:,0],'r')
-ax = fig.gca()
-ax.set_ylim((0,255))
-fig.add_subplot(312).plot(t,rx_signal[:,1],'g')
-ax = fig.gca()
-ax.set_ylim((0,255))
-fig.add_subplot(313).plot(t,rx_signal[:,2],'b')
-ax = fig.gca()
-ax.set_ylim((0,255))
-
-canvas_plot = FigureCanvasTkAgg(fig, master = center_frame)
-canvas_plot.draw()
-canvas_plot.get_tk_widget().pack(side=tkinter.LEFT, fill=tkinter.BOTH, expand=1)
-
-
+fig = Figure() #create the plot figure
+delta_t = 18.904 #rolling shutter delta t in microseconds
+roi = int(camera.resolution[0]/2)#column of interest TODO: expand ROI to [x,y,w,h]
+t = np.arange(0,camera.resolution[1]*delta_t,delta_t) #the relative time of each pixel row
+canvas_plot = FigureCanvasTkAgg(fig, master = center_frame) #tkinter canvas
+canvas_plot.draw() 
+canvas_plot.get_tk_widget().pack(side=tkinter.LEFT, fill=tkinter.BOTH, expand=1) #pack the canvas in the window
+refresh_plots(roi) #(re)draw the plots at the (column) region of interest
 
 def _quit():
     root.quit()
@@ -187,5 +165,9 @@ def _quit():
     
 button_quit = tkinter.Button(master=top_frame, text="close occ gui", command=_quit, anchor='e')
 button_quit.pack(side=tkinter.RIGHT)
+
+#####################
+#### end of code ####
+#####################
 
 tkinter.mainloop()
